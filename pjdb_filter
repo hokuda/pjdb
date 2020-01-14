@@ -1,0 +1,1291 @@
+#!/usr/bin/python3 -u
+# -*- coding: utf-8 -*-
+# 文字化け防止コメント(comment in order to avoid garbling multibyte chars)
+#!/usr/bin/pudb3
+"""
+pjdb
+"""
+
+import sys
+import os
+import re
+import datetime
+import time
+import subprocess
+import tempfile
+import io
+import json
+import threading
+import traceback
+if 'RLWRAP_FILTERDIR' in os.environ:
+    sys.path.append(os.environ['RLWRAP_FILTERDIR'])
+else:
+    sys.path.append('.')
+import rlwrapfilter
+from websocket import create_connection
+
+
+# constants
+PJDB_PORT="PJDB_PORT"
+PORT=int(os.environ[PJDB_PORT])
+BREAKPOINT_FILE='./pjdb.breakpoint'
+SOURCEPATH_FILE='./pjdb.sourcepath'
+DEBUGLOG_FILE = './pjdb_filter.log'
+DEBUGLOG = open(DEBUGLOG_FILE, mode='at') # append in text mode
+#DEBUG = True
+DEBUG = False
+PROMPT = r"((>)|(.*[^ ]\[[0-9]+\])) $" # default prompt pattern
+COMMANDS = [
+    # standard jdb commands
+    'connectors',
+    'run',
+    'threads',
+    'thread',
+    'suspend',
+    'resume',
+    'where',
+    'wherei',
+    'up',
+    'down',
+    'kill',
+    'interrupt',
+    'print',
+    'dump',
+    'eval',
+    'set',
+    'locals',
+    'classes',
+    'class',
+    'methods',
+    'fields',
+    'threadgroups',
+    'threadgroup',
+    'stop', # "stop in" and "stop at" are abolished
+    'clear',
+    'catch',
+    'ignore',
+    'watch',
+    'unwatch',
+    'trace',
+    'untrace',
+    'step',
+    'stepi',
+    'next',
+    'cont',
+    'list',
+    'use',
+    'exclude',
+    'classpath',
+    'monitor',
+    'unmonitor',
+    'read',
+    'lock',
+    'threadlocks',
+    'pop',
+    'reenter',
+    'redefine',
+    'disablegc',
+    'enablegc',
+    '!!',
+    'help',
+    'version',
+    'exit',
+    'quit',
+    #### custom commands
+    'view', # view source code
+    'break', # set/show break point
+    'delete', # delete break point
+    'save-breakpoint', # save breakpoints to pjdb.breakpoint file
+    ]
+LONGNAMES = {
+    's':'step',
+    'c':'cont',
+    'p':'print',
+    'n':'next',
+    'w':'where',
+    'd':'dump',
+    'l':'list',
+    'v':'view',
+    }
+ACRONYMS = {LONGNAMES[k] : k for k in LONGNAMES} # reverse map of LONGNAMES
+
+
+
+class FixedRlwrapFilter(rlwrapfilter.RlwrapFilter):
+    def write_patiently(fh, buffer):
+        """
+        keep writing until all bytes from $buffer were written to $fh
+        """
+        already_written = 0
+        count = len(buffer)
+        while(already_written < count):
+            try:
+                nwritten = os.write(fh, buffer[already_written:])
+                if (nwritten <= 0):
+                    send_error("error writing: {0}".format(str(buffer)))
+                    already_written = already_written + nwritten
+            except BrokenPipeError: # ignore harmless error when rlwrap dies
+                sys.exit(0)
+
+
+# globals
+#rlwrap_filter = rlwrapfilter.RlwrapFilter()
+rlwrap_filter = FixedRlwrapFilter()
+
+class Singleton(type):
+    """
+    singleton metaclass
+    """
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            instance = super(Singleton, cls).__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+        cls._instances[cls].next = None
+        return cls._instances[cls]
+
+
+class CompletionRequest:
+    """
+    request for completion
+    """
+    
+    def __init__(self, line, prefix, completions):
+        debug('CompletionRequest.__init__: line=' + line)
+        debug('CompletionRequest.__init__: prefix=' + prefix)
+        debug('CompletionRequest.__init__: completions=[' + ', '.join(completions) + ']')
+        self.line = line
+        self.prefix = prefix
+        self.completions = completions
+        self.tokens = get_tokens(line)
+        debug('CompletionRequest.__init__: tokens=[' + ', '.join(self.tokens) + ']')
+        debug('CompletionRequest.__init__: len(tokens)=' + str(len(self.tokens)))
+
+        
+class ExecutorBase:
+    """
+    base class for functions
+    """
+
+    def __init__(self):
+        self.next = None
+
+    def set_next(self, next):
+        self.next = next
+        return next
+
+    def handle_completion(self, request):
+        raise NotImplementedError()
+        
+    def completion_handler(self, request):
+        request = self.handle_completion(request)
+        if len(request.completions) == 0 and self.next != None: # req.completions==['']
+            request = self.next.completion_handler(request)
+        return request
+
+    def handle_input(self, input):
+        raise NotImplementedError()
+        
+    def input_handler(self, input):
+        input = self.handle_input(input)
+        if self.next != None:
+            input = self.next.input_handler(input)
+        return input
+
+    def handle_output(self, output):
+        raise NotImplementedError()
+        
+    def output_handler(self, output):
+        output = self.handle_output(output)
+        if self.next != None:
+            output = self.next.output_handler(output)
+        return output
+
+    def handle_prompt(self, prompt):
+        raise NotImplementedError()
+        
+    def prompt_handler(self, prompt):
+        prompt = self.handle_prompt(prompt)
+        if self.next != None:
+            prompt = self.next.prompt_handler(prompt)
+        return prompt
+
+    
+
+class CommandNameCompletionExecutor(ExecutorBase):
+    def __init__(self):
+        super().__init__()
+
+    def handle_completion(self, request):
+        if len(request.tokens) != 1:
+            return request
+        pattern = r'^' + request.prefix
+        completions = list(filter((lambda s: re.search(pattern, s)), COMMANDS))
+        request.completions.extend(completions)
+        return request
+
+    
+class LocalsCompletionExecutor(ExecutorBase):
+    def __init__(self):
+        super().__init__()
+
+    def handle_completion(self, request):
+        if request.tokens[-1] != request.prefix:
+            return request
+        debug("Locals.handle_completion: " + request.tokens[0])
+        if not request.tokens[0] in ['print', 'dump', 'p']:
+            return request
+        output = rlwrap_filter.cloak_and_dagger("locals", PROMPT, 10)
+        locals = self.grep_by_prefix(request.prefix, self.parse_locals(output))
+        if len(locals) == 1:
+            locals.append(locals[0] + ".") # add "var." to completion list
+        request.completions.extend(locals)
+        return request
+
+
+    def parse_locals(self, result):
+        vars = list(
+            filter(
+                (lambda v: v != None),
+                map(self.extract_varname, result.split('\n'))
+            ))
+        return vars
+
+    def extract_varname(self, line):
+        m = re.search(r"(.*) = .*", line)
+        if m == None:
+            return None
+        else:
+            return m.group(1)
+
+    def grep_by_prefix(self, prefix, vars):
+        return list(filter((lambda v: re.search(r"^" + prefix, v)), vars))
+
+
+class ClassMemberCompletionExecutor(ExecutorBase):
+    """
+    complete names of fields and methods
+    """
+    def __init__(self):
+        super().__init__()
+
+    def handle_completion(self, request):
+        if not request.tokens[0] in ['print', 'dump', 'p', 'eval', 'set', 'break', 'b', 'class', 'watch', 'unwatch']:
+            return request
+        debug("ClassMemberCompletionExecutor.handle_completion: request.completions=[" + ",".join(request.completions))
+        last_token = request.tokens[-1]
+        if not '.' in last_token:
+            return request
+        [base_name, tail, paren] = self.parse_last_token(last_token)
+        debug("ClassMemberCompetionExecutor.do_complition: base_name={0} tail={1} paren={2}".format(base_name, tail, paren))
+        class_name = base_name if self.is_class_name(base_name) else self.get_class_name(base_name)
+        if class_name == None:
+            return request
+        debug("ClassMemberCompetionExecutor.do_complition: class_name=" + class_name)
+        if class_name != None:
+            if paren == "":
+                fields = self.complete_fields(class_name, tail)
+                debug("ClassMemberCompletionExecutor.handle_completion: fields=[" + ",".join(fields))
+                request.completions.extend(fields)
+            methods = self.complete_methods(class_name, tail, paren)
+            # TODO:
+            # the below 8 lines generate ugly output, but no choice due to limitation of break chars ' .' (-b option)
+            index_of_last_dot = (tail+paren).rfind('.')
+            if(index_of_last_dot > 0):
+                before_last_dot = (tail+paren)[0:index_of_last_dot]
+                len_before_last_dot = len(before_last_dot)
+                candidates = map((lambda m: m[len_before_last_dot+1:]), methods)
+            else:
+                candidates = methods
+            request.completions.extend(candidates)
+            # add "var." to completion list
+            debug("ClassMemberCompletionExecutor.handle_completion: len(request.completions)=" + str(len(request.completions)))
+            debug("ClassMemberCompletionExecutor.handle_completion: request.completions=" + ','.join(request.completions))
+            debug("ClassMemberCompletionExecutor.handle_completion: tail=" + tail)
+            debug("ClassMemberCompletionExecutor.handle_completion: paren=" + paren)
+            if len(request.completions)==1 and request.completions[0] == tail + paren:
+                request.completions.append(request.completions[0] + ".")
+        return request
+
+    def parse_last_token(self, last_token):
+        """
+        decompose token to fqdn, method, and parenses
+        (example)
+        when $last_token = "org.apache.catalina.connector.CoyoteAdapter.service(org.apache.",
+        prior     = "org.apache.catalina.connector.CoyoteAdapter" and 
+        posterior = "service"
+        paren     = "(org.apache."
+        """
+        m = re.match(r"(.+)\.([^\.\(]+)(\([^\)]*[\)]?)$", last_token)
+        if m != None:
+            debug("ClassMemberCompletionExecutor.parse_last_token: " +
+                  "| {0} | {1} | {2} |".format(m.group(1), m.group(2), m.group(3)))
+            return [m.group(1), m.group(2), m.group(3)]
+
+        m = re.match(r"(.+)\.([^\.\(]+)$", last_token)
+        if m != None:
+            debug("ClassMemberCompletionExecutor.parse_last_token: " +
+                  "| {0} | {1} |".format(m.group(1), m.group(2)))
+            return [m.group(1), m.group(2), ""]
+
+        m = re.match(r"(.+)\.$", last_token)
+        if m != None:
+            debug("ClassMemberCompletionExecutor.parse_last_token: " +
+                  "| {0} |".format(m.group(1)))
+            return [m.group(1), "", ""]
+
+        return ["", "", ""] # finally
+        
+    def is_class_name(self, name):
+        """
+        returns true if `class $name` returns a valid class name.
+        """
+        command = "class {0}".format(name)
+        output = rlwrap_filter.cloak_and_dagger(command, PROMPT, 10)
+        debug("is_class_name: output={0}".format(output))
+        m = re.match(r"Class: .*", output)
+        return m != None
+        
+    def get_class_name(self, name):
+        """
+        returns $name.getClass()
+        if $name.getClass() has an invalid value, returns None
+        """
+        output = rlwrap_filter.cloak_and_dagger("print {0}.getClass()".format(name), PROMPT, 10)
+        debug("get_class_name : output = {0}".format(output))
+        # example:
+        # http-/127.0.0.1:8080-1[1] print res.commited.getClass()
+        # com.sun.tools.example.debug.expr.ParseException: Cannot access field of primitive type: false
+        #  res.commited.getClass() = null
+        # http-/127.0.0.1:8080-1[1] print res.getClass()
+        #  res.getClass() = "class org.apache.coyote.Response"
+        m = re.match(r".+ = \"class (.+)\"", output)
+        class_name = m.group(1) if m != None else None
+        debug("get_class_name : class_name = {0}".format(class_name))
+        return class_name
+
+    def complete_fields(self, class_name, tail):
+        debug("ClassMemberCompletionExecutor.complete_fields: tail=" + tail)
+        output = rlwrap_filter.cloak_and_dagger("fields {0}".format(class_name), PROMPT, 10)
+        debug("ClassMemberCompletionExecutor.complete_fields: output=" + output)
+        fields = self.parse_fields(output)
+        debug("ClassMemberCompletionExecutor.complete_fields: fields=[" + ",".join(fields))
+        return list(filter((lambda x: re.search(r"^" + tail , x)), fields))
+    
+
+    def parse_fields(self, output):
+        lines = output.split("\r\n")
+        lines = lines[1:] # remove first
+        debug("ClassMemberCompletionExecutor.parse_fields: lines = " + ",".join(lines))
+        fields = list(
+            map(
+                (lambda m: m.group(2)),
+                filter(
+                    (lambda m: m != None),
+                    map((lambda l: re.match(r"([^\s]+)\s([^\s]+)", l)), lines)
+                )
+            )
+        )
+        return fields
+
+
+    def complete_methods(self, class_name, tail, paren):
+        debug("ClassMemberCompletionExecutor.complete_methods: tail=" + tail)
+        output = rlwrap_filter.cloak_and_dagger("methods {0}".format(class_name), PROMPT, 10)
+        debug("ClassMemberCompletionExecutor.complete_methods: output=" + output)
+        methods = self.parse_methods(output)
+        debug("ClassMemberCompletionExecutor.complete_methods: methods=[" + ",".join(methods))
+        pattern = r'^' + re.escape(tail + paren.replace(' ', ''))
+        debug("ClassMemberCompletionExecutor.complete_methods: pattern=" + pattern)
+        return list(filter((lambda x: re.search(pattern , x)), methods))
+    
+
+    def parse_methods(self, output):
+        lines = output.split("\r\n")
+        lines = lines[1:] # remove first
+        debug("ClassMemberCompletionExecutor.parse_methods: lines = " + ",".join(lines))
+        methods = list(
+            map(
+                (lambda m: m.group(2)),
+                filter(
+                    (lambda m: m != None),
+                    map((lambda l: re.match(r"([^\s]+)\s(.+)", l)), lines)
+                )
+            )
+        )
+        # remove space in each methods
+        methods = list(map((lambda m: m.replace(' ', '')), methods))
+        return methods
+
+
+class ClassNameCompletionExecutor(ExecutorBase):
+
+    def __init__(self):
+        super().__init__()
+
+    def escape_dots(self, string):
+        """
+        escape dots
+        """
+        return string.replace('.', '\\.')
+
+
+    """
+    complete FQCN
+    """
+    def handle_completion(self, request):
+        if not request.tokens[0] in ['print', 'dump', 'p', 'break', 'b', 'class', 'watch', 'unwatch']:
+            return request
+        prefix = request.tokens[-1]
+        output = rlwrap_filter.cloak_and_dagger("classes", PROMPT, 5, prompt_search_from=-256)
+        classes = re.split(r"\s+", output)
+        classes = list(filter((lambda x: x.startswith(prefix)), classes))
+
+        ind = prefix.rfind(".")
+        if ind == -1: # not found '.'
+            components = map((lambda x: re.match(r"^(" + prefix + ".*)", x).group(1)), classes)
+        else:
+            pkg = prefix[:ind]
+            components = map((lambda x: re.match(r"^" + pkg + r"\.([^\.]+).*", x).group(1)), classes)
+    
+        components   = list(set(components)) # dedup
+
+        if len(components) == 1: # add "var." to completion list
+            components.append(components[0] + ".")
+
+        request.completions.extend(components)
+        return request
+
+
+class ExpandAcronymExecutor(ExecutorBase):
+    """
+    replace an acronym to a long form
+    """
+    def __init__(self):
+        super().__init__()
+
+    def handle_input(self, input):
+        # strip() removes leading and trailing spaces. no-arg split() is a bad idea
+        input_tokens = input.strip().split(' ')
+        if not input_tokens: # the list input_token is empty
+            return input
+        try:
+            input_tokens[0] = LONGNAMES[input_tokens[0]]
+            return ' '.join(input_tokens)
+        except KeyError:
+            return input
+
+
+class AbstractCustomCommandExecutor(ExecutorBase, metaclass=Singleton):
+    """
+    Abstract class to implement your own custom command.
+
+    usage:
+    1. Declare the subclass and implement the following methods:
+    - is_the_command(input) identify if the input is your custom command
+    - do_the_command(input) does what you want with the command
+
+    2. Register the subclass in input_handler, output_handler, and prompt_handler.
+    """
+    def __init__(self):
+        super().__init__()
+        self.command_entered = False
+
+    def handle_input(self, input):
+        """
+        stores input in self.input and returns input without any change.
+        This entails the input is executed, though output of the result is dropped in handle_output. 
+        You may have to take care of the side effect.
+        """
+        self.input = input
+        if self.is_the_command(input):
+            self.command_entered = True
+        return input
+
+    def is_the_command(self, input):
+        """
+        identify if the input is your custom command
+        """
+        raise NotImplementedError()
+
+    def handle_output(self, output):
+        """
+        Eats output if self.command_invoked == True
+        """
+        if self.command_entered == True:
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name
+                  + ": output = " + output)
+            return ''
+        return output
+    
+    def handle_prompt(self, prompt):
+        """
+        does what you really want to do with input command and write results you make to console
+        """
+        if self.command_entered == True:
+            self.do_the_command(self.input)
+            self.command_entered = False
+        return prompt
+
+    def do_the_command(self, input):
+        raise NotImplementedError()
+    
+
+class DeleteCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
+    """
+    `delete` shows breakpoints
+    `delete #` removes #th breakpoint
+    """
+    def __init__(self):
+        super().__init__()
+        self.index_out_of_bound = False
+
+    def is_the_command(self, input):
+        tokens = input.strip().split()
+        if tokens and tokens[0] == 'delete':
+            return True
+        else:
+            return False
+
+    def do_the_command(self, input):
+        """
+        Show break points/Removes #th break point
+        """
+        tokens = input.strip().split() # not a typo. strip().split(' ') is bad here
+        try:
+            index = int(tokens[1])
+        except ValueError:
+            self.print_help()
+            return
+        except IndexError:
+            self.print_breakpoints()
+            return
+        try:
+            manager = BreakPointManager()
+            breakpoint = manager.get(index)
+            breakpoint.disable()
+            manager.remove(index)
+            manager.print_result()
+        except IndexError:
+            rlwrap_filter.send_output_oob('index out of range\n')
+            self.print_breakpoints()
+
+    def print_breakpoints(self):
+        manager = BreakPointManager()
+        breakpoints = manager.get_all()
+        if not breakpoints:
+            rlwrap_filter.send_output_oob('No breakpoint\n')
+            return
+        for i,b in enumerate(breakpoints):
+            s = "    {:>2d} {:s}".format(i, b.to_string())
+            rlwrap_filter.send_output_oob(s + '\n')
+
+    def print_help(self):
+        rlwrap_filter.send_output_oob(
+            "Usage: delete\n" +
+            "       delete <number>\n"
+        )
+
+
+class SaveBreakpointCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
+    """
+    `save-breakpoint` saves breakpoints to pjdb.breakpoint
+    """
+    def __init__(self):
+        super().__init__()
+        self.index_out_of_bound = False
+
+    def is_the_command(self, input):
+        tokens = input.strip().split()
+        if tokens and tokens[0] == 'save-breakpoint':
+            return True
+        else:
+            return False
+
+    def do_the_command(self, input):
+        """
+        backup the file
+        write breakpoints to the file
+        """
+        try:
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+            src = BREAKPOINT_FILE
+            dst = '.'.join([BREAKPOINT_FILE, timestamp])
+            os.rename(src, dst)
+        except OSError:
+            rlwrap_filter.send_output_oob('Could not rename ' + src + ' to ' + dst + '\n')
+            rlwrap_filter.send_output_oob(traceback.format_exc())
+            return
+        try:
+            f = open(BREAKPOINT_FILE, 'w')
+            manager = BreakPointManager()
+            breakpoints = manager.get_all()
+            if not breakpoints:
+                rlwrap_filter.send_output_oob('No breakpoint\n')
+                return
+            for b in breakpoints:
+                f.write(b.to_string())
+        except OSError:
+            rlwrap_filter.send_output_oob(traceback.format_exc())
+
+    
+class BreakCommandExecutor(DeleteCommandExecutor, metaclass=Singleton):
+    """
+    `stop` command with no argument shows # and breakpoints
+    `stop in|at <breakpoint> if <condition>` sets a conditional breakpoint
+    """
+    def __init__(self):
+        super().__init__()
+
+    def is_the_command(self, input):
+        tokens = input.strip().split()
+        if tokens and tokens[0] == 'break':
+            return True
+        else:
+            return False
+
+    def do_the_command(self, input):
+        """
+        Show break points/Removes #th break point
+        """
+        tokens = input.strip().split(None, 1) # split into the command name and <breakpoint [if condition]>
+        if len(tokens) == 1:
+            self.print_breakpoints()
+            return
+        try:
+            manager = BreakPointManager()
+            factory = BreakPointFactory()
+            breakpoint = factory.create(tokens[1])
+            manager.add(breakpoint, update_pjdb_breakpoint=True)
+            manager.print_result()
+        except IndexError:
+            rlwrap_filter.send_output_oob('index out of range\n')
+            self.print_breakpoints()
+
+
+class DisableStopCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
+    """
+    disable "stop at/in ..." command
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def is_the_command(self, input):
+        tokens = input.strip().split()
+        if tokens and tokens[0] == 'stop':
+            return True
+        else:
+            return False
+
+    def do_the_command(self, input):
+        """
+        Only show message
+        """
+        rlwrap_filter.send_output_oob('stop command is disabled.\n')
+        rlwrap_filter.send_output_oob('Use `break` instead.\n')
+
+
+class DisableClearCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
+    """
+    disable "stop at/in ..." command
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def is_the_command(self, input):
+        tokens = input.strip().split()
+        if tokens and tokens[0] == 'clear':
+            return True
+        else:
+            return False
+
+    def do_the_command(self, input):
+        """
+        Only show message
+        """
+        rlwrap_filter.send_output_oob('clear command is disabled.\n')
+        rlwrap_filter.send_output_oob('Use `delete` instead.\n')
+
+
+class RepeatLastCommandExecutor(ExecutorBase, metaclass=Singleton):
+    """
+    Pressing enter key without typing a command do the last command to step
+    """
+    def __init__(self):
+        super().__init__()
+        self.last_command = None
+
+
+    def handle_input(self, input):
+        """
+        Remembers the input_tokens, returns last_command when input_tokens is empty
+        """
+        input_tokens = input.strip().split(' ')
+        if input_tokens[0] == '' and self.last_command in ['s', 'c', 'n', 'step', 'cont', 'next']:
+            input = self.last_command
+        else:
+            self.last_command = input
+        return input
+
+
+class BreakpointInfoSenderExecutor(ExecutorBase, metaclass=Singleton):
+    """
+    send outputs of where, locals, list, and dump this
+    """
+    def __init__(self):
+        super().__init__()
+        #self.lexer = JavaLexer()
+        self.at_startup = True
+        self.frame = ""
+        try:
+            self.conn = create_connection("ws://localhost:55555/")
+        except Exception as e:
+            self.conn = None
+            #self.conn.send("{\"stop_at\":\"testteste\"}")
+
+    def _parse_where(self, where):
+        """
+        parse `where` output
+        example:
+        [2] org.keycloak.services.managers.CodeGenerateUtil$AuthenticatedClientSessionModelParser.retrieveCode (CodeGenerateUtil.java:208)
+        [3] org.keycloak.services.managers.CodeGenerateUtil$AuthenticatedClientSessionModelParser.retrieveCode (CodeGenerateUtil.java:162)
+        ...
+        then, extract class and line number in the first frame
+        find file
+        return filename in str and line number at break point in integer, total line number in integer
+        example:
+        ["org.keycloak.services.managers.CodeGenerateUtil$AuthenticatedClientSessionModelParser",  208]
+        """
+        first = where.split('\n')[0]
+        try:
+            tokens = first.lstrip().split()
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": tokens = " + str(tokens))
+            fqcn = tokens[1].rsplit('.', 1)[0]
+            lineno = int(tokens[2].rsplit(':', 1)[1].rstrip(')').replace(',',''))
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": stop at " + fqcn + ":" + str(lineno))
+            return fqcn, lineno
+        except:
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": " + traceback.format_exc())
+            return None, None
+        
+    def _find_file(self, fqcn):
+        """
+        find file dissolving package.class$innerclass
+        [example]
+        find_file("io.undertow.server.session.InMemorySessionManager$SessionImpl.getAttributeNames")
+        returns "/source/path/to/io/undertow/server/session/InMemorySessionManager.java"
+        """
+        parent = fqcn.split('$', 1)[0]
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": parent:" + parent)
+        try:
+            pkg, cls = tuple(parent.rsplit('.', 1))
+        except ValueError as e:
+            return None, None
+        pkgdir = pkg.replace('.', '/')
+        manager = SourcePathManager()
+        srcpath = manager.source_path
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": srcpath:" + str(srcpath))
+        for p in srcpath:
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": p: " + p)
+            for root, dirs, files in os.walk(p):
+                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": root: " + root)
+                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": dirs: " + str(dirs))
+                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": files: " + str(files))
+                if not pkgdir in root:
+                    continue
+                for f in files:
+                    if f != cls + ".java":
+                        continue
+                    full_path = root + '/' + f
+                    return full_path
+        return None
+
+    def is_frame_changed(self, where):
+        """
+        True if the last frame changed since last invocation
+        """
+        frame = where.split('\n')[0]
+        if frame == self.frame:
+            return False
+        else:
+            self.frame = frame
+            return True
+
+    def handle_prompt(self, prompt):
+        """
+        send outputs of where, locals, and dump this and highlight souce code via websocket
+        """
+#        if self.at_startup:
+#            rlwrap_filter.vacuum_stale_message(PROMPT, 1)
+#            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": &&&&&&&&&&&&&&&&&&&&&&&&&&")
+#            rlwrap_filter.cumulative_output = ""
+#            self.at_startup = False
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": prompt = " + prompt)
+
+        where = rlwrap_filter.cloak_and_dagger('where', PROMPT, 10)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": where = " + where)
+        
+        out = rlwrap_filter.cumulative_output
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": cumulative output = " + out)
+        
+        if not ((prompt == "> ") # no thread stopped
+                or ("\nStep completed: " in out) # step
+                or ("\nBreakpoint hit: " in out) # breakpoint hit
+                or (out == "" and self.is_frame_changed(where)) # move to upper/lower frame
+        ):
+            return prompt # do not send update
+        
+        fqcn, lineno = self._parse_where(where)
+        if fqcn == None:
+            return prompt # do not send update
+        if lineno == None:
+            return prompt # do not send update
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": fqcn, lineno = " + fqcn + ", " + str(lineno))
+        
+        path = self._find_file(fqcn)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": path: " + str(path))
+
+        bplinenos = [x.lineno for x in filter(
+            lambda x:type(x)==BreakPointAtLine and x.fqcn==fqcn, BreakPointManager().get_all()
+        )]
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": bplinenos: " + str(bplinenos))
+
+        info = json.dumps(
+            {
+                'where': where,
+                'locals': rlwrap_filter.cloak_and_dagger('locals', PROMPT, 10),
+                'list': 'obsolete',
+                'dump_this': rlwrap_filter.cloak_and_dagger('dump this', PROMPT, 10),
+                'class': fqcn,
+                'lineno': lineno,
+                'path': path,
+                'bplinenos': bplinenos,
+            }
+        )
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": sending info:" + info)
+        if self.conn != None:
+            self.conn.send(info)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": sent info:" + info)
+        #websocket_connection.write_message(info)
+        
+        return prompt
+
+
+class ConditionalBreakpointExecutor(ExecutorBase):
+    """
+    Catches "Breakpoint hit: "thread=...", package.ClassName.method(), line=MM bci=NN",
+    repeat "cont" and "print <condition>" until <condition> is true.
+    Supports only 'stop at' command but not 'stop in' command
+    """
+    def __init__(self):
+        super().__init__()
+
+    def handle_prompt(self, prompt):
+        """
+        Fetches cumulative_output if output =~ /^Breakpoint hit:.*/, 
+        parses it, and register classname and line number
+        """
+        output = rlwrap_filter.cumulative_output
+        location = self.get_breakpoint_location_at_line(output)
+        if location == None:
+            return prompt
+        condition = self.get_condition(location)
+        if condition == None:
+            return prompt
+        if self.is_condition_true(condition):
+            return prompt
+        output = self.do_continue()
+        lines = output.split('\r\n')
+        output_wo_prompt = '\n'.join(lines[0:-2])
+        # print output
+        rlwrap_filter.send_output_oob(output_wo_prompt + '\n\n')
+        rlwrap_filter.cumulative_output = ''
+        return prompt
+
+    def do_continue(self):
+        return rlwrap_filter.cloak_and_dagger('cont', PROMPT, 0.1)
+        
+    def get_condition(self, location):
+        manager = BreakPointManager()
+        for b in manager.get_all():
+            if b.location == location:
+                return b.condition
+        return None
+
+    def is_condition_true(self, condition):
+        output = rlwrap_filter.cloak_and_dagger('print ' + condition, PROMPT, 0.1)
+        result = self.parse_output(output)
+        # condition 隧穂ｾ｡邨先棡繧定｡ｨ遉ｺ
+        if result:
+            rlwrap_filter.send_output_oob('Conditional breakpoint hit since: '
+                                          + output.split('\r\n')[0]
+                                          + '\n')
+        else:
+            rlwrap_filter.send_output_oob('Conditional breakpoint skipped since: '
+                                          + '\n'.join(output.split('\r\n')[0:-1])
+                                          + '\n')
+        return result
+
+    def parse_output(self, output):
+        tokens = output.split('\r\n')[0].split(' ')
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": tokens = " + ','.join(tokens))
+        return tokens[-1] == 'true'
+    
+    def get_breakpoint_location_at_line(self, output):
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
+        m = re.search(r"Breakpoint hit: \"thread=.*\", (.*), line=([0-9]*) bci=.*", output)
+        if m:
+            class_method = m.group(1)
+            linenum = m.group(2)
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name
+                  + ": class_method = " + class_method
+                  + ": linenum = " + linenum
+            )
+            class_name = re.match(r'(.+)\.[^\.]+\(.*\)', class_method).group(1)
+            return class_name + ':' + linenum
+        return None
+
+
+class BreakPointBase:
+    """
+    break point
+    """
+    def __init__(self, location=None, condition=None):
+        self.location = location
+        self.condition = condition
+
+    def enable(self):
+        raise NotImplementedError()
+
+    def disable(self):
+        output = rlwrap_filter.cloak_and_dagger("clear " + self.location, PROMPT, 0.1)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
+
+    def to_string(self):
+        raise NotImplementedError()
+
+
+class BreakPointInMethod(BreakPointBase):
+
+    def enable(self):
+        output = rlwrap_filter.cloak_and_dagger("stop in " + self.location, PROMPT, 0.1)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
+
+    def to_string(self):
+        return self.location
+
+
+class BreakPointAtLine(BreakPointBase):
+
+    def __init__(self, location=None, condition=None):
+        super().__init__(location=location, condition=condition)
+        self.fqcn, self.lineno = location.split(':')
+            
+    def enable(self):
+        output = rlwrap_filter.cloak_and_dagger("stop at " + self.location, PROMPT, 0.1)
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
+
+    def to_string(self):
+        if self.condition:
+            return self.location + ' if ' + self.condition
+        else:
+            return self.location
+
+
+class BreakPointFactory(metaclass=Singleton):
+    def __init__(self):
+        pass
+
+    def create(self, expression):
+        debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": creating a break point for " + expression)
+        m = re.match(r'(.+)\s+if\s+(.+)', expression)
+        if m:
+            location = m.group(1)
+            condition = m.group(2)
+        else:
+            location = expression
+            condition = None
+        if re.match(r'\S+:[0-9]+', location):
+            return BreakPointAtLine(location, condition=condition)
+        return BreakPointInMethod(location)
+
+
+class BreakPointManager(metaclass=Singleton):
+    def __init__(self):
+        self.break_points = []
+        self.result = None
+
+    def add(self, break_point, update_pjdb_breakpoint=False):
+        for existing in self.break_points:
+            if not break_point.location == existing.location:
+                continue
+            existing.disable()
+            self.break_points.remove(existing)
+            self.result = 'Replaced existing "' + existing.to_string() + '" with "' + break_point.to_string() + '"'
+            break
+        else:
+            self.result = 'Added "' + break_point.to_string() + '"'
+                
+        self.break_points.append(break_point)
+        break_point.enable()
+        if update_pjdb_breakpoint:
+            try:
+                with open(BREAKPOINT_FILE, 'a') as f:
+                    f.write(break_point.to_string() + '\n')
+            except OSError:
+                rlwrap_filter.send_output_oob(traceback.format_exc())
+        return self.break_points.index(break_point)
+
+    def remove(self, i):
+        removed = self.break_points.pop(i)
+        self.result = 'Deleted: ' + removed.to_string()
+            
+    def get_all(self):
+        return self.break_points
+    
+    def get(self, i):
+        return self.break_points[i]
+        
+    def enable_all(self):
+        for b in self.break_points:
+            b.enable()
+
+    def disable_all(self):
+        for b in self.break_points:
+            b.disable()
+
+    def print_result(self):
+        rlwrap_filter.send_output_oob(self.result)
+        rlwrap_filter.send_output_oob('\n')
+
+
+class WebSocketServerThread(threading.Thread):
+
+    """docstring for TestThread"""
+
+    def __init__(self):
+        super(WebSocketServerThread, self).__init__(daemon=True)
+
+    def run(self):
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        application = tornado.web.Application([
+            (r"/websocket", WebSocketInfoHandler),
+        ])
+        application.listen(PORT, address='127.0.0.1')
+        tornado.ioloop.IOLoop.current().start()
+
+    def waitForGettingStarted(self):
+        while True:
+            try:
+                ws = create_connection("ws://localhost:"+str(PORT)+"/websocket")
+                ws.close()
+                break
+            except ConnectionRefusedError as e:
+                pass
+
+
+def set_breakpoint():
+    try:
+        with open(BREAKPOINT_FILE, "rt") as file:
+            rlwrap_filter.send_output_oob("Found "+ BREAKPOINT_FILE + "\n")
+            debug(sys._getframe().f_code.co_name + ": read from : " + str(file))
+            manager = BreakPointManager()
+            factory = BreakPointFactory()
+            for line in file:
+                debug(sys._getframe().f_code.co_name + ": read: " + line)
+                line = line.strip() # remove \n at the end of the line
+                if line.startswith('#'):
+                    continue
+                b = factory.create(line)
+                manager.add(b)
+    except Exception as e:
+        rlwrap_filter.send_output_oob('Could not open ' + BREAKPOINT_FILE + ' (' + str(e) + ')\n')
+
+
+def vacuum_until_match(substring):
+    debug("vacuum_until_match: substring = " + substring)
+    while(True):
+        output = rlwrap_filter.vacuum_stale_message(substring, 1.0)
+        debug("vacuum_until_match: output = " + output)
+        if substring in output:
+            return
+
+
+class SourcePathManager(metaclass=Singleton):
+    def __init__(self):
+        self.source_path = []
+
+
+def set_sourcepath():
+    sourcepath = '' # list of paths delimited by ':'
+    manager = SourcePathManager()
+    try:
+        with open(SOURCEPATH_FILE, "rt") as file:
+            rlwrap_filter.send_output_oob("Found " + SOURCEPATH_FILE + '\n')
+            for path in file:
+                path = path.rstrip() # remove \n at the end of the line
+                manager.source_path.append(path)
+                if re.match(r'^\s*#.*', path):
+                    continue
+                sourcepath += path + ':'
+    except Exception as e:
+        rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ')\n')
+    output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", 10);
+
+        
+def debug(msg):
+    if DEBUG:
+        now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        DEBUGLOG.write(now)
+        DEBUGLOG.write(" ")
+        DEBUGLOG.write(msg)
+        DEBUGLOG.write('\n')
+        DEBUGLOG.flush()
+
+
+def info(msg):
+    rlwrap_filter.send_output_oob(msg)
+    rlwrap_filter.send_output_oob('\n')
+
+
+def initialize():
+    def do_nothing():
+        pass
+    global initialize
+    set_breakpoint()
+    set_sourcepath()
+
+    # clean up stale output which arrives late
+    #time.sleep(1)
+    #rlwrap_filter.discharge_scum(PROMPT, 1.0)
+
+    initialize = do_nothing # run once
+
+
+def prompt_handler(prompt):
+    """
+    prompt handler
+    """
+    if len(prompt)==0:
+        #return "> "
+        return ""
+    else:
+        initialize()
+        debug("prompt_handler: prompt=|" + prompt + "|")
+        #return prompt
+    executor = DeleteCommandExecutor()
+    executor.set_next(
+        ConditionalBreakpointExecutor()
+    ).set_next(
+        BreakCommandExecutor()
+    ).set_next(
+        DisableStopCommandExecutor()
+    ).set_next(
+        DisableClearCommandExecutor()
+    ).set_next(
+        BreakpointInfoSenderExecutor()
+    ).set_next(
+        SaveBreakpointCommandExecutor()
+    )
+    prompt = executor.prompt_handler(prompt)
+    return prompt
+
+
+def completion_handler(line, prefix, completions):
+    """
+    completion handler
+    """
+    executor = CommandNameCompletionExecutor()
+    executor.set_next(
+        LocalsCompletionExecutor()
+    ).set_next(
+        ClassMemberCompletionExecutor()
+    ).set_next(
+        ClassNameCompletionExecutor()
+    )
+    BreakPointManager().disable_all()
+    request = executor.completion_handler(CompletionRequest(line, prefix, completions))
+    BreakPointManager().enable_all()
+    return request.completions
+
+
+def input_handler(input):
+    """
+    input handler
+    """
+    executor = ExpandAcronymExecutor()
+    executor.set_next(
+        DeleteCommandExecutor()
+    ).set_next(
+        BreakCommandExecutor()
+    ).set_next(
+        DisableStopCommandExecutor()
+    ).set_next(
+        DisableClearCommandExecutor()
+    ).set_next(
+        RepeatLastCommandExecutor()
+    ).set_next(
+        SaveBreakpointCommandExecutor()
+    )
+    input = executor.input_handler(input)
+    return input
+
+
+def output_handler(output):
+    """
+    output handler
+    """
+    executor = DeleteCommandExecutor()
+    executor.set_next(
+        BreakCommandExecutor()
+    ).set_next(
+        DisableStopCommandExecutor()
+    ).set_next(
+        DisableClearCommandExecutor()
+    )
+    output = executor.output_handler(output)
+    return output
+
+
+def get_tokens(line):
+    """
+    returns the tokens + '' if line ends with " "(white space)
+    retruns the tokens otherwise
+    """
+    tokens = re.split(r'\s', line.lstrip(' '))
+    debug('get_tokes: ["' + '", "'.join(tokens) + '"]')
+    return tokens
+
+
+def logit(message, tag):
+    """
+    a message_handler is seldom used (as it cannot change messages, only examine them) 
+    It gets called with the tag as its second argument
+    """
+    tagname = rlwrap_filter.tag2name(tag)
+    tagname = re.sub(r'^TAG_', '', tagname)
+    mangled = message
+    mangled = re.sub(r'\n', r'\\n', mangled)
+    mangled = re.sub(r'\r', r'\\r', mangled)
+    mangled = re.sub(r'\t', r'\\t', mangled)
+    mangled = re.sub(r'\x1b', r'\\e', mangled)
+    debug("logit: {0:10s} '{1}'".format(tagname, mangled))
+    return message
+
+    
+if __name__ == '__main__':
+
+    debug('pjdb gets started\n')
+
+    rlwrap_filter.cloak_and_dagger_verbose = False
+    #rlwrap_filter.cloak_and_dagger_verbose = True
+    rlwrap_filter.prompt_handler = prompt_handler
+    rlwrap_filter.completion_handler = completion_handler
+    rlwrap_filter.input_handler = input_handler
+    rlwrap_filter.output_handler = output_handler
+    if DEBUG:
+        rlwrap_filter.message_handler=logit
+
+    rlwrap_filter.run()

@@ -1,0 +1,478 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+# issues
+# unable to paste with mouse middle button -> it seems impossible in nature of prompt toolkit
+# implement file cache
+
+from __future__ import unicode_literals
+from prompt_toolkit.application import Application
+from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import to_filter
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.defaults import load_key_bindings
+from prompt_toolkit.layout import Layout, VSplit, HSplit, Window
+from prompt_toolkit.layout import Dimension
+from prompt_toolkit.layout import ScrollOffsets
+from prompt_toolkit.layout.dimension import D
+from prompt_toolkit.layout.margins import Margin
+from prompt_toolkit.layout.margins import NumberedMargin
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.lexers import PygmentsLexer
+from prompt_toolkit.shortcuts import yes_no_dialog
+from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import default_pygments_style
+from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.widgets import SearchToolbar
+
+from ptterm import Terminal
+
+from pygments.lexers.python import PythonLexer
+from pygments.lexers.jvm import JavaLexer
+
+import tornado.websocket
+
+import asyncio
+import datetime
+from distutils.spawn import find_executable
+import json
+import os
+import threading
+import traceback
+import sys
+import itertools
+
+LOG_FILE = './pjdb.log'
+LOG_FD = open(LOG_FILE, mode='at') # append in text mode
+BINDIR = os.path.abspath(os.path.dirname(__file__))
+HISTORY_FILE="./pjdb.history";
+RLWRAP_LOG_FILE="./rlwrap.log";
+PJDB_PORT="PJDB_PORT"
+PJDB_PORT_INT=55555
+
+
+os.environ[PJDB_PORT] = str(PJDB_PORT_INT)
+
+
+class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
+    """ 
+    Margin that displays only the current line marker and the break point marker.
+    """
+
+    bplinenos = []
+    current_lineno = 0
+    
+    def __init__(self):
+        pass
+
+    def get_width(self, get_ui_content):
+        line_count = get_ui_content().line_count
+        #return len(str(line_count)) + 1 + 1
+        return 1
+
+    def create_margin(self, window_render_info, width, height):
+        style = "class:line-number"
+        style_current = "class:line-number bold fg:ansiblack reverse"
+        style_breakpoint = "class:line-number bold fg:ansired"
+        style_breakpoint_current = "class:line-number bold fg:ansired reverse"
+        result = []
+        last_lineno = None
+
+        for lineno in window_render_info.displayed_lines:
+            is_current = lineno == NoNumberedMarginWithCurrentlineAndBreakpoint.current_lineno
+            is_breakpoint = lineno in NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": lineno:" + str(lineno))
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": bplinenos:" + str(NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos))
+            # Only display line number if this line is not a continuation of the previous line.
+            if lineno == last_lineno:
+                result.append(("", "\n"))
+                continue
+
+            if is_current and not is_breakpoint:
+                result.append(
+                    (style_current,            ">\n".rjust(width))
+                )
+            elif not is_current and is_breakpoint:
+                result.append(
+                    (style_breakpoint,         "*\n".rjust(width))
+                )
+            elif is_current and is_breakpoint:
+                result.append(
+                    (style_breakpoint_current, ">\n".rjust(width))
+                )
+            else:
+                result.append(
+                    (style,                    " \n".rjust(width))
+                )
+            last_lineno = lineno
+
+        return result
+
+
+class WebSocketHandler(tornado.websocket.WebSocketHandler):
+    # where, locals, dump this, list
+    def check_origin(self, origin):
+        return True
+
+    def open(self):
+        debug("opening websocket")
+
+    def on_message(self, message):
+        """
+        expected message should be json like:
+        {
+        class:<class>,
+        lineno:<lineno>,
+        path:<path to the source code>},
+        where:<where>,
+        this: <this>,
+        locals:<locals>,
+        }
+        """
+        try:
+            debug(message)
+            decoded = json.loads(message)
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": bp info in json:" + str(decoded))
+
+            # where
+            where = decoded.get('where').replace('\r','')
+            debug("where=" + where)
+            text_where_area.text = where
+
+            # locals
+            _locals = decoded.get('locals').replace('\r','')
+            debug("locals=" + _locals)
+            text_locals_area.text = _locals
+            
+            # this
+            _this = decoded.get('dump_this').replace('\r','')
+            debug("this=" + _this)
+            text_this_area.text = _this
+
+            # break point line numbers
+            # line number in the margin starts with 0
+            bplinenos = [int(x)-1 for x in decoded.get('bplinenos')]
+            NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos = bplinenos
+            
+            # code
+            fqcn = decoded.get('class')
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": fqcn:" + fqcn)
+            lineno = decoded.get('lineno')
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": lineno:" + str(lineno))
+            # line number in the margin starts with 0
+            NoNumberedMarginWithCurrentlineAndBreakpoint.current_lineno = lineno - 1
+            path = decoded.get('path')
+            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": path:" + str(path))
+            if path != None:
+                code = self._get_code(path)
+                lines = code.split('\n')
+                lines_with_numbers = ["{} {}".format(str(i),l) for i,l in zip(itertools.count(1), lines)]
+                code = '\n'.join(lines_with_numbers)
+                #cursor_position = sum([len(lines[i])+1 for i in range(lineno-1)])
+                cursor_position = sum([len(lines_with_numbers[i])+1 for i in range(lineno-1)])
+            else:
+                code = "source code is not found"
+                cursor_position = 0
+            #text_code_area.text = code
+            #text_code_area.document = Document(code, lineno)
+            text_code_area.buffer.set_document(Document(code, cursor_position), bypass_readonly=True)
+            
+        except json.decoder.JSONDecodeError as e:
+            debug(e.msg)
+            debug(str(e))
+            warn(traceback.format_exc())
+            #raise e
+        except Exception as e:
+            debug("other exception")
+            warn(traceback.format_exc())
+ 
+    def on_close(self):
+        debug("closing websocket")
+
+    def _get_code(self, path):
+        code = ""
+        try:
+            with open(path, "rt") as fd:
+                code = ''.join(fd.readlines())
+                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": code:" + code)
+        except Exception as e:
+            warn(traceback.format_exc())
+            raise e
+        return code
+
+
+class WebSocketServerThread(threading.Thread):
+
+    """docstring for TestThread"""
+
+    def __init__(self):
+        super(WebSocketServerThread, self).__init__(daemon=True)
+
+    def run(self):
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        application = tornado.web.Application([
+            (r"/", WebSocketHandler),
+        ])
+        application.listen(PJDB_PORT_INT, address='127.0.0.1')
+        tornado.ioloop.IOLoop.instance().start()
+
+
+def log_write(level, msg):
+    now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    LOG_FD.write(" ".join([now, level, msg]))
+    LOG_FD.write("\n")
+    LOG_FD.flush()
+
+
+def debug(msg):
+    log_write("DEBUG", msg)
+
+
+def warn(msg):
+    log_write("WARN", msg)
+
+
+def main():
+
+    sys.stdin = os.fdopen(sys.stdin.fileno(), 'rb', 0)
+    
+    thread = WebSocketServerThread()
+    thread.start()
+
+    top = TextArea(
+        text='',
+        read_only=True,
+        height=1,
+        style='class:title',
+    )
+
+    widget_list = [
+        (term1,
+         ' C-q:exit  C-x:switch focus  C-s,/:search  C-c:enter/exit copy mode  C-spc:mark  C-w:copy  C-y:paste'), # has focus at startup
+        (text_code_area,
+         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy  s:step  n:next  u:step up'),
+        (text_where_area,
+         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
+        (text_this_area,
+         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
+        (text_locals_area,
+         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
+    ]
+
+    kb = KeyBindings()
+
+    @Condition
+    def is_focus_on_code():
+        "true if focus on code"
+        return widget_list[-1][0] == text_code_area
+
+    @kb.add('n', filter=is_focus_on_code)
+    def _(event):
+        "next"
+        term1.terminal_control.process.write_input("next\n")
+    
+    @kb.add('s', filter=is_focus_on_code)
+    def _(event):
+        "step"
+        term1.terminal_control.process.write_input("step\n")
+    
+    @kb.add('u', filter=is_focus_on_code)
+    def _(event):
+        "step up"
+        term1.terminal_control.process.write_input("step up\n")
+    
+    @kb.add('b', filter=is_focus_on_code)
+    def _(event):
+        "set break point"
+        #term1.terminal_control.process.write_input("step up\n")
+        text_locals_area.text = "b entered with line num = " + str(text_code_area.document.cursor_position_row)
+    
+    @Condition
+    def is_focus_on_term():
+        "true if focus on term"
+        return widget_list[-1][0] == term1
+
+    @Condition
+    def is_copying_on_term():
+        return term1.is_copying
+
+#    @kb.add('c-x')
+#    def _(event):
+#        text_locals_area.text = "c-x entered with " + str(event)
+#        text_this_area.text = "(widget_list[-1][0] == term1) = " + str(widget_list[-1][0] == term1) + str(widget_list)
+#        text_where_area.text = "term1.is_copying = " + str(term1.is_copying)
+        
+    #@kb.add('c-c', eager=True, filter=is_focus_on_term & ~is_copying_on_term)
+    @kb.add('c-c', filter=is_focus_on_term & ~is_copying_on_term)
+    def _(event):
+        text_locals_area.text = "c-c entered with " + str(event)
+        term1.enter_copy_mode()
+
+    @kb.add('c-x')
+    def _(event):
+        switch_focus()
+
+    @kb.add('c-y')
+    def _(event):
+        "paste"
+        term1.terminal_control.process.write_input(
+            clipboard.get_data().text,
+        )
+    
+    @kb.add('c-q', eager=True)
+    def _(event):
+        term1.terminal_control.process.write_input('\x05\x15\x04') # send ^e^u^d(EOT) to terminate rlwrap
+        event.app.exit()
+
+    @kb.add('c-z', eager=True)
+    def _(event):
+        term1.terminal_control.process.write_input('\n')
+        text_locals_area.text = "you hit c-z"
+
+#    @kb.add('c-e', eager=True)
+#    def _(event):
+#        text_locals_area.text = """hoge"""
+
+
+    def switch_focus():
+        " Change focus when Control-W is pressed."
+        widget = widget_list.pop(0)
+        application.layout.focus(widget[0])
+        top.text = widget[1]
+        widget_list.append(widget)
+
+    # not sure why, but this is needed not to break prompt with 'where' output
+    term1.terminal_control.process.write_input('\n')
+
+    clipboard=PyperclipClipboard()
+
+    application = Application(
+        layout=Layout(
+            container=HSplit([
+                top,
+                VSplit([
+                    #Window(style='bg:#aaaaff', width=1),
+                    HSplit([
+                        text_locals_area,
+                        text_this_area,
+                        text_where_area,
+                    ],
+                           padding=1,
+                           padding_char='-',
+                    ),
+                    HSplit([
+                        text_code_area,
+                        term1,
+                    ],
+                           padding=1,
+                           padding_char='-',
+                           #height = divide_equally,
+                    ),
+                ],
+                       #padding=1,
+                       #padding_char='|',
+                ),
+                search_field,
+            ]),
+            focused_element=term1
+        ),
+        #########################################################################################
+        #include_default_pygments_style=False,
+        #########################################################################################
+        style=style,
+        key_bindings=merge_key_bindings([
+            load_key_bindings(),
+            kb,
+        ]),
+        full_screen=True,
+        mouse_support=True,
+        clipboard=clipboard,
+    )
+
+    # focus on term
+    switch_focus()
+    application.run()
+
+
+search_field = SearchToolbar(text_if_not_searching=[
+    ('class:not-searching', "Press '/' to start searching.")])
+
+
+style = Style([
+    ('terminal focused',    'bg:#aaaaaa'),
+    ('title', 'bg:#000044 #ffffff underline'),
+    ('pygments.comment', 'noitalic #800000'),
+])
+
+
+divide_equally = Dimension(min=10, max=30, weight=1)
+
+
+text_where_area = TextArea(
+    text         = '',
+    read_only    = True,
+    scrollbar    = True,
+    search_field = search_field,
+    lexer        = PygmentsLexer(PythonLexer),
+)
+
+
+text_code_area = TextArea(
+    text         = '',
+    read_only    = True,
+    scrollbar    = True,
+    line_numbers = True,
+    search_field = search_field,
+    lexer        = PygmentsLexer(JavaLexer),
+)
+#text_code_area.window.cursorline = to_filter(True)
+text_code_area.window.cursorline = to_filter(False)
+text_code_area.window.scroll_offsets = ScrollOffsets(top=8, bottom=8, left=0, right=0)
+text_code_area.window.left_margins = [NoNumberedMarginWithCurrentlineAndBreakpoint()]
+
+
+rlwrap = find_executable('rlwrap')
+if rlwrap is None: exit("Not found rlwrap")
+pjdb_filter = BINDIR + '/pjdb_filter'
+rlwrap_opts = ['-H', HISTORY_FILE,
+               '-l', RLWRAP_LOG_FILE,
+               '-w', '200',
+               #'-pRED',
+               '-pBLUE',
+               '-C', 'jdb',
+               '-b', "' .'",
+               '-z',
+               pjdb_filter]
+jdb = find_executable('jdb')
+jdb_opts = sys.argv[1:]
+cmd = [rlwrap] + rlwrap_opts + [jdb] + jdb_opts
+term1 = Terminal(
+    command=cmd,
+    height = Dimension(min=20, max=20, weight=1)
+)
+
+
+text_locals_area = TextArea(
+    text         = '',
+    read_only    = True,
+    #height       = divide_equally,
+    scrollbar    = True,
+    search_field = search_field,
+    lexer        = PygmentsLexer(PythonLexer),
+)
+
+
+text_this_area = TextArea(
+    text         = '',
+    read_only    = True,
+    #height       = divide_equally,
+    scrollbar    = True,
+    search_field = search_field,
+    lexer        = PygmentsLexer(PythonLexer),
+)
+
+
+if __name__ == '__main__':
+    main()
