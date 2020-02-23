@@ -241,7 +241,7 @@ def main():
     thread = WebSocketServerThread()
     thread.start()
 
-    top = TextArea(
+    kb_help_text_box = TextArea(
         text='',
         read_only=True,
         height=1,
@@ -340,7 +340,7 @@ def main():
         " Change focus when Control-W is pressed."
         widget = widget_list.pop(0)
         application.layout.focus(widget[0])
-        top.text = widget[1]
+        kb_help_text_box.text = widget[1]
         widget_list.append(widget)
 
     # not sure why, but this is needed not to break prompt with 'where' output
@@ -351,7 +351,7 @@ def main():
     application = Application(
         layout=Layout(
             container=HSplit([
-                top,
+                kb_help_text_box,
                 VSplit([
                     #Window(style='bg:#aaaaff', width=1),
                     HSplit([

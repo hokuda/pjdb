@@ -776,23 +776,34 @@ class BreakpointInfoSenderExecutor(ExecutorBase, metaclass=Singleton):
         [example]
         find_file("io.undertow.server.session.InMemorySessionManager$SessionImpl.getAttributeNames")
         returns "/source/path/to/io/undertow/server/session/InMemorySessionManager.java"
+
+        >>> SourcePathManager().source_path.append('.')
+        >>> print(SourcePathManager().source_path)
+        ['.']
+        >>> sender = BreakpointInfoSenderExecutor()
+        >>> sender._find_file('hello')
+        './hello.java'
+        >>> sender._find_file('org.test.hello')
+        './org/test/hello.java'
         """
         parent = fqcn.split('$', 1)[0]
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": parent:" + parent)
         try:
-            pkg, cls = tuple(parent.rsplit('.', 1))
+            tokens = parent.split('.')
+            cls = tokens.pop(-1)
+            pkg = tokens
         except ValueError as e:
             return None, None
-        pkgdir = pkg.replace('.', '/')
+        pkgdir = '/'.join(pkg)
         manager = SourcePathManager()
         srcpath = manager.source_path
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": srcpath:" + str(srcpath))
         for p in srcpath:
             debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": p: " + p)
             for root, dirs, files in os.walk(p):
-                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": root: " + root)
-                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": dirs: " + str(dirs))
-                #debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": files: " + str(files))
+                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": root: " + root)
+                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": dirs: " + str(dirs))
+                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": files: " + str(files))
                 if not pkgdir in root:
                     continue
                 for f in files:
@@ -1276,6 +1287,11 @@ def logit(message, tag):
 
     
 if __name__ == '__main__':
+    if __file__ == "./test_filter":
+        # run `PJDB_PORT=12345 RLWRAP_FILTERDIR=/usr/share/rlwrap/filters ./test_filter`
+        import doctest
+        doctest.testmod(verbose=True)
+        sys.exit(0)
 
     debug('pjdb gets started\n')
 
