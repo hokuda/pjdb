@@ -1143,7 +1143,7 @@ def set_sourcepath():
                 sourcepath += path + ':'
     except Exception as e:
         rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ')\n')
-    output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", 10);
+    output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", 1);
 
         
 def debug(msg):

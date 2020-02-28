@@ -7,8 +7,10 @@
 
 from __future__ import unicode_literals
 from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import SelectionType
 from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import has_selection
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
@@ -51,7 +53,6 @@ HISTORY_FILE="./pjdb.history";
 RLWRAP_LOG_FILE="./rlwrap.log";
 PJDB_PORT="PJDB_PORT"
 PJDB_PORT_INT=55555
-
 
 os.environ[PJDB_PORT] = str(PJDB_PORT_INT)
 
@@ -249,16 +250,31 @@ def main():
     )
 
     widget_list = [
-        (term1,
-         ' C-q:exit  C-x:switch focus  C-s,/:search  C-c:enter/exit copy mode  C-spc:mark  C-w:copy  C-y:paste'), # has focus at startup
-        (text_code_area,
-         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy  s:step  n:next  u:step up'),
-        (text_where_area,
-         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
-        (text_this_area,
-         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
-        (text_locals_area,
-         ' C-q:exit C-x:switch focus  C-s,/:search  C-spc:mark  C-w:copy'),
+        # (widget,
+        #  help message if not marked,
+        #  help message if marked,
+        #  help message for term not in copy-mode)
+        [
+            term1,
+            " C-q:exit  C-w:switch focus  C-c:enter copy mode  C-y:paste", # has focus at startup
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region  C-c:exit copy mode",
+        ], [
+            text_code_area,
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-spc:mark  s:step  n:next  u:step up  c:cont",
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region",
+        ], [
+            text_where_area,
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-space:mark",
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region",
+        ], [
+            text_this_area,
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-space:mark",
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region",
+        ], [
+            text_locals_area,
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-space:mark",
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region",
+        ],
     ]
 
     kb = KeyBindings()
@@ -268,25 +284,29 @@ def main():
         "true if focus on code"
         return widget_list[-1][0] == text_code_area
 
-    @kb.add('n', filter=is_focus_on_code)
+    @kb.add('n', filter=is_focus_on_code & ~has_selection)
     def _(event):
         "next"
         term1.terminal_control.process.write_input("next\n")
     
-    @kb.add('s', filter=is_focus_on_code)
+    @kb.add('s', filter=is_focus_on_code & ~has_selection)
     def _(event):
         "step"
         term1.terminal_control.process.write_input("step\n")
     
-    @kb.add('u', filter=is_focus_on_code)
+    @kb.add('u', filter=is_focus_on_code & ~has_selection)
     def _(event):
         "step up"
         term1.terminal_control.process.write_input("step up\n")
     
-    @kb.add('b', filter=is_focus_on_code)
+    @kb.add('c', filter=is_focus_on_code & ~has_selection)
+    def _(event):
+        "step up"
+        term1.terminal_control.process.write_input("cont\n")
+    
+    @kb.add('b', filter=is_focus_on_code & ~has_selection)
     def _(event):
         "set break point"
-        #term1.terminal_control.process.write_input("step up\n")
         text_locals_area.text = "b entered with line num = " + str(text_code_area.document.cursor_position_row)
     
     @Condition
@@ -307,12 +327,40 @@ def main():
     #@kb.add('c-c', eager=True, filter=is_focus_on_term & ~is_copying_on_term)
     @kb.add('c-c', filter=is_focus_on_term & ~is_copying_on_term)
     def _(event):
-        text_locals_area.text = "c-c entered with " + str(event)
+        #text_locals_area.text = "c-c entered with " + str(event)
         term1.enter_copy_mode()
+        widget_list[-1][1] = " C-q:exit  C-w:switch focus  C-s,/:search  C-space:mark  C-c:exit copy mode"
+        kb_help_text_box.text = widget_list[-1][1]
 
-    @kb.add('c-x')
+    @kb.add('c-c', eager=True, filter=is_focus_on_term & is_copying_on_term)
+    def _(event):
+        #text_locals_area.text = "c-c entered with " + str(event)
+        term1.exit_copy_mode()
+        widget_list[-1][1] = " C-q:exit  C-w:switch focus  C-c:enter copy mode  C-y:paste"
+        kb_help_text_box.text = widget_list[-1][1]
+    
+    @kb.add('c-g')
+    def _(event):
+        """
+        reset mark
+        """
+        event.current_buffer.selection_state = None
+        kb_help_text_box.text = widget_list[-1][1]
+        
+    @kb.add('c-@')
+    def _(event):
+        """
+        set mark
+        """
+        buff = event.current_buffer
+        if buff.text:
+            buff.start_selection(selection_type=SelectionType.CHARACTERS)
+        kb_help_text_box.text = widget_list[-1][2]
+
+    @kb.add('c-w', eager=True)
     def _(event):
         switch_focus()
+        kb_help_text_box.text = widget_list[-1][1]
 
     @kb.add('c-y')
     def _(event):
@@ -330,18 +378,28 @@ def main():
     def _(event):
         term1.terminal_control.process.write_input('\n')
         text_locals_area.text = "you hit c-z"
-
-#    @kb.add('c-e', eager=True)
-#    def _(event):
-#        text_locals_area.text = """hoge"""
-
+        
+    #    @kb.add('c-e', eager=True)
+    #    def _(event):
+    #        text_locals_area.text = """hoge"""
+    @kb.add('escape', 'w', filter=has_selection)
+    def _(event):
+        """
+        Copy selected text.
+        """
+        data = event.current_buffer.copy_selection()
+        clipboard.set_data(data)
+        #text_locals_area.text = "you hit escape w"
+        kb_help_text_box.text = widget_list[-1][1]
 
     def switch_focus():
-        " Change focus when Control-W is pressed."
-        widget = widget_list.pop(0)
-        application.layout.focus(widget[0])
-        kb_help_text_box.text = widget[1]
-        widget_list.append(widget)
+        """
+        Change focus
+        """
+        next_widget_info = widget_list.pop(0)
+        next_widget = next_widget_info[0]
+        application.layout.focus(next_widget)
+        widget_list.append(next_widget_info)
 
     # not sure why, but this is needed not to break prompt with 'where' output
     term1.terminal_control.process.write_input('\n')
@@ -393,6 +451,7 @@ def main():
 
     # focus on term
     switch_focus()
+    kb_help_text_box.text = widget_list[-1][1]
     application.run()
 
 
@@ -473,6 +532,10 @@ text_this_area = TextArea(
     lexer        = PygmentsLexer(PythonLexer),
 )
 
+# init: marked = False
+# hit space: mark at cursor and marked = True
+# move cursor
+# hit space: copy region
 
 if __name__ == '__main__':
     main()
