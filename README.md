@@ -5,6 +5,8 @@ pjdb
 
 [license]: https://github.com/hokuda/pjdb/blob/master/LICENSE
 
+![screen-shot](screen-shot.png)
+
 A wrapper script to enhance `jdb`. It gives `jdb`:
 
 * [`delete` command to delete break point with index](#delete-command)
@@ -28,7 +30,8 @@ Dependencies
 * [`python3`](https://www.python.org/)
 * [`tornado`](http://www.tornadoweb.org/en/stable/)
 * [`websocket-client`](https://github.com/websocket-client/websocket-client)
-* [`ptterm`](https://github.com/prompt-toolkit/ptterm)
+* [`ptterm/prompt-toolkit`](https://github.com/prompt-toolkit/ptterm)
+* [`pyperclip`](https://github.com/asweigart/pyperclip)
 
 
 Installation
@@ -49,7 +52,7 @@ Installation
 
 * install tornado, websocket-client, and ptterm
 
-      $ sudo pip3 install tornado websocket-client ptterm
+      $ pip3 install --user tornado websocket-client ptterm pyperclip
 
 * install pjdb
 
