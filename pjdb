@@ -445,7 +445,7 @@ def main():
             kb,
         ]),
         full_screen=True,
-        mouse_support=True,
+        mouse_support=False,
         clipboard=clipboard,
     )
 
