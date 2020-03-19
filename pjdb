@@ -54,6 +54,8 @@ HISTORY_FILE="./pjdb.history";
 RLWRAP_LOG_FILE="./rlwrap.log";
 PJDB_PORT="PJDB_PORT"
 PJDB_PORT_INT=55555
+DEBUG=False
+DEBUG=True
 
 os.environ[PJDB_PORT] = str(PJDB_PORT_INT)
 
@@ -85,29 +87,23 @@ class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
         for lineno in window_render_info.displayed_lines:
             is_current = lineno == NoNumberedMarginWithCurrentlineAndBreakpoint.current_lineno
             is_breakpoint = lineno in NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos
-            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": lineno:" + str(lineno))
-            debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": bplinenos:" + str(NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos))
+            if lineno % 10 == 0:
+                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": lineno:" + str(lineno) + " bplinenos:" + str(NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos))
             # Only display line number if this line is not a continuation of the previous line.
             if lineno == last_lineno:
                 result.append(("", "\n"))
                 continue
 
-            if is_current and not is_breakpoint:
-                result.append(
-                    (style_current,            ">\n".rjust(width))
-                )
-            elif not is_current and is_breakpoint:
-                result.append(
-                    (style_breakpoint,         "*\n".rjust(width))
-                )
-            elif is_current and is_breakpoint:
-                result.append(
-                    (style_breakpoint_current, ">\n".rjust(width))
-                )
+            if is_current:
+                if is_breakpoint:
+                    result.append((style_breakpoint_current, ">\n".rjust(width)))
+                else:
+                    result.append((style_current,            ">\n".rjust(width)))
             else:
-                result.append(
-                    (style,                    " \n".rjust(width))
-                )
+                if is_breakpoint:
+                    result.append((style_breakpoint,         "*\n".rjust(width)))
+                else:
+                    result.append((style,                    " \n".rjust(width)))
             last_lineno = lineno
 
         return result
@@ -222,14 +218,15 @@ class WebSocketServerThread(threading.Thread):
 
 
 def log_write(level, msg):
-    now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S.%f")
     LOG_FD.write(" ".join([now, level, msg]))
     LOG_FD.write("\n")
     LOG_FD.flush()
 
 
 def debug(msg):
-    log_write("DEBUG", msg)
+    if DEBUG:
+        log_write("DEBUG", msg)
 
 
 def warn(msg):

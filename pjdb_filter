@@ -32,8 +32,8 @@ BREAKPOINT_FILE='./pjdb.breakpoint'
 SOURCEPATH_FILE='./pjdb.sourcepath'
 DEBUGLOG_FILE = './pjdb_filter.log'
 DEBUGLOG = open(DEBUGLOG_FILE, mode='at') # append in text mode
-#DEBUG = True
 DEBUG = False
+DEBUG = True
 PROMPT = r"((>)|(.*[^ ]\[[0-9]+\])) $" # default prompt pattern
 COMMANDS = [
     # standard jdb commands
@@ -1148,7 +1148,7 @@ def set_sourcepath():
         
 def debug(msg):
     if DEBUG:
-        now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S.%f")
         DEBUGLOG.write(now)
         DEBUGLOG.write(" ")
         DEBUGLOG.write(msg)
