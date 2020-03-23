@@ -33,7 +33,7 @@ SOURCEPATH_FILE='./pjdb.sourcepath'
 DEBUGLOG_FILE = './pjdb_filter.log'
 DEBUGLOG = open(DEBUGLOG_FILE, mode='at') # append in text mode
 DEBUG = False
-DEBUG = True
+#DEBUG = True
 PROMPT = r"((>)|(.*[^ ]\[[0-9]+\])) $" # default prompt pattern
 COMMANDS = [
     # standard jdb commands
@@ -109,6 +109,16 @@ LONGNAMES = {
     }
 ACRONYMS = {LONGNAMES[k] : k for k in LONGNAMES} # reverse map of LONGNAMES
 
+COMMANDS_WITH_ARGUMENT_COMPLETION = [
+    'p', 'print',
+    'd', 'dump',
+    'eval',
+    'set',
+    'b', 'break',
+    'class',
+    'watch',
+    'unwatch'
+]
 
 
 class FixedRlwrapFilter(rlwrapfilter.RlwrapFilter):
@@ -233,7 +243,7 @@ class LocalsCompletionExecutor(ExecutorBase):
         if request.tokens[-1] != request.prefix:
             return request
         debug("Locals.handle_completion: " + request.tokens[0])
-        if not request.tokens[0] in ['print', 'dump', 'p']:
+        if not request.tokens[0] in COMMANDS_WITH_ARGUMENT_COMPLETION:
             return request
         output = rlwrap_filter.cloak_and_dagger("locals", PROMPT, 10)
         locals = self.grep_by_prefix(request.prefix, self.parse_locals(output))
@@ -270,7 +280,7 @@ class ClassMemberCompletionExecutor(ExecutorBase):
         super().__init__()
 
     def handle_completion(self, request):
-        if not request.tokens[0] in ['print', 'dump', 'p', 'eval', 'set', 'break', 'b', 'class', 'watch', 'unwatch']:
+        if not request.tokens[0] in COMMANDS_WITH_ARGUMENT_COMPLETION:
             return request
         debug("ClassMemberCompletionExecutor.handle_completion: request.completions=[" + ",".join(request.completions))
         last_token = request.tokens[-1]
@@ -434,7 +444,7 @@ class ClassNameCompletionExecutor(ExecutorBase):
     complete FQCN
     """
     def handle_completion(self, request):
-        if not request.tokens[0] in ['print', 'dump', 'p', 'break', 'b', 'class', 'watch', 'unwatch']:
+        if not request.tokens[0] in COMMANDS_WITH_ARGUMENT_COMPLETION:
             return request
         prefix = request.tokens[-1]
         output = rlwrap_filter.cloak_and_dagger("classes", PROMPT, 5, prompt_search_from=-256)

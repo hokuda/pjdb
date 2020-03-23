@@ -67,6 +67,10 @@ class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
 
     bplinenos = []
     current_lineno = 0
+    style = "class:line-number"
+    style_current = "class:line-number bold fg:ansiblack reverse"
+    style_breakpoint = "class:line-number bold fg:ansired"
+    style_breakpoint_current = "class:line-number bold fg:ansired reverse"
     
     def __init__(self):
         pass
@@ -77,17 +81,13 @@ class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
         return 1
 
     def create_margin(self, window_render_info, width, height):
-        style = "class:line-number"
-        style_current = "class:line-number bold fg:ansiblack reverse"
-        style_breakpoint = "class:line-number bold fg:ansired"
-        style_breakpoint_current = "class:line-number bold fg:ansired reverse"
         result = []
         last_lineno = None
 
         for lineno in window_render_info.displayed_lines:
             is_current = lineno == NoNumberedMarginWithCurrentlineAndBreakpoint.current_lineno
             is_breakpoint = lineno in NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos
-            if lineno % 10 == 0:
+            if lineno % 10 == 0 and DEBUG:
                 debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": lineno:" + str(lineno) + " bplinenos:" + str(NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos))
             # Only display line number if this line is not a continuation of the previous line.
             if lineno == last_lineno:
@@ -96,14 +96,14 @@ class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
 
             if is_current:
                 if is_breakpoint:
-                    result.append((style_breakpoint_current, ">\n".rjust(width)))
+                    result.append((type(self).style_breakpoint_current, ">\n"))
                 else:
-                    result.append((style_current,            ">\n".rjust(width)))
+                    result.append((type(self).style_current,            ">\n"))
             else:
                 if is_breakpoint:
-                    result.append((style_breakpoint,         "*\n".rjust(width)))
+                    result.append((type(self).style_breakpoint,         "*\n"))
                 else:
-                    result.append((style,                    " \n".rjust(width)))
+                    result.append((type(self).style,                    " \n"))
             last_lineno = lineno
 
         return result
