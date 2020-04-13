@@ -54,10 +54,26 @@ HISTORY_FILE="./pjdb.history";
 RLWRAP_LOG_FILE="./rlwrap.log";
 PJDB_PORT="PJDB_PORT"
 PJDB_PORT_INT=55555
+
+import socket, errno
+
+for _ in range(8):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", PJDB_PORT_INT))
+    except socket.error as e:
+        if e.errno == errno.EADDRINUSE:
+            print("Port " + str(PJDB_PORT_INT) + " is already in use")
+            PJDB_PORT_INT += 1
+    else:
+        s.close()
+        break
+
+os.environ[PJDB_PORT] = str(PJDB_PORT_INT)
+
 DEBUG=False
 DEBUG=True
 
-os.environ[PJDB_PORT] = str(PJDB_PORT_INT)
 
 
 class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):

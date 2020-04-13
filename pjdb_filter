@@ -750,7 +750,7 @@ class BreakpointInfoSenderExecutor(ExecutorBase, metaclass=Singleton):
         self.at_startup = True
         self.frame = ""
         try:
-            self.conn = create_connection("ws://localhost:55555/")
+            self.conn = create_connection("ws://localhost:" + str(PORT) + "/")
         except Exception as e:
             self.conn = None
             #self.conn.send("{\"stop_at\":\"testteste\"}")
