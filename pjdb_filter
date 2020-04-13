@@ -106,6 +106,7 @@ LONGNAMES = {
     'd':'dump',
     'l':'list',
     'v':'view',
+    'b':'break',
     }
 ACRONYMS = {LONGNAMES[k] : k for k in LONGNAMES} # reverse map of LONGNAMES
 
