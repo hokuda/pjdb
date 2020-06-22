@@ -32,6 +32,7 @@ Dependencies
 * [`websocket-client`](https://github.com/websocket-client/websocket-client)
 * [`ptterm/prompt-toolkit`](https://github.com/prompt-toolkit/ptterm)
 * [`pyperclip`](https://github.com/asweigart/pyperclip)
+* [`pygments`](https://github.com/pygments/pygments)
 
 
 Installation
@@ -52,7 +53,7 @@ Installation
 
 * install tornado, websocket-client, and ptterm
 
-      $ pip3 install --user tornado websocket-client ptterm pyperclip
+      $ pip3 install --user tornado websocket-client ptterm pyperclip pygments
 
 * install pjdb
 
