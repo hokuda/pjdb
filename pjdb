@@ -301,31 +301,35 @@ def main():
     handle('pageup')(scroll_page_up)
 
     @Condition
-    def is_focus_on_code():
+    def has_focus_on_code():
         "true if focus on code"
-        return widget_list[-1][0] == text_code_area
+        return application.layout.has_focus(text_code_area)
 
-    @kb.add('n', filter=is_focus_on_code & ~has_selection)
+    @Condition
+    def has_focus_on_search():
+        return application.layout.has_focus(search_field)
+
+    @kb.add('n', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "next"
         term1.terminal_control.process.write_input("next\n")
     
-    @kb.add('s', filter=is_focus_on_code & ~has_selection)
+    @kb.add('s', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "step"
         term1.terminal_control.process.write_input("step\n")
     
-    @kb.add('u', filter=is_focus_on_code & ~has_selection)
+    @kb.add('u', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "step up"
         term1.terminal_control.process.write_input("step up\n")
     
-    @kb.add('c', filter=is_focus_on_code & ~has_selection)
+    @kb.add('c', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "step up"
         term1.terminal_control.process.write_input("cont\n")
     
-    @kb.add('b', filter=is_focus_on_code & ~has_selection)
+    @kb.add('b', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "set break point"
         text_locals_area.text = "b entered with line num = " + str(text_code_area.document.cursor_position_row)
@@ -339,18 +343,11 @@ def main():
     def is_copying_on_term():
         return term1.is_copying
 
-#    @kb.add('c-x')
-#    def _(event):
-#        text_locals_area.text = "c-x entered with " + str(event)
-#        text_this_area.text = "(widget_list[-1][0] == term1) = " + str(widget_list[-1][0] == term1) + str(widget_list)
-#        text_where_area.text = "term1.is_copying = " + str(term1.is_copying)
-        
-    #@kb.add('c-c', eager=True, filter=is_focus_on_term & ~is_copying_on_term)
     @kb.add('c-c', filter=is_focus_on_term & ~is_copying_on_term)
     def _(event):
         #text_locals_area.text = "c-c entered with " + str(event)
         term1.enter_copy_mode()
-        widget_list[-1][1] = " C-q:exit  C-w:switch focus  C-s,/:search  C-space:mark  C-c:exit copy mode"
+        widget_list[-1][1] = " C-q:exit  C-s,/:search  C-space:mark  C-c:exit copy mode"
         kb_help_text_box.text = widget_list[-1][1]
 
     @kb.add('c-c', eager=True, filter=is_focus_on_term & is_copying_on_term)
@@ -378,7 +375,7 @@ def main():
             buff.start_selection(selection_type=SelectionType.CHARACTERS)
         kb_help_text_box.text = widget_list[-1][2]
 
-    @kb.add('c-w', eager=True)
+    @kb.add('c-w', eager=True, filter=~is_copying_on_term)
     def _(event):
         switch_focus()
         kb_help_text_box.text = widget_list[-1][1]
@@ -400,9 +397,6 @@ def main():
         term1.terminal_control.process.write_input('\n')
         text_locals_area.text = "you hit c-z"
         
-    #    @kb.add('c-e', eager=True)
-    #    def _(event):
-    #        text_locals_area.text = """hoge"""
     @kb.add('escape', 'w', filter=has_selection)
     def _(event):
         """
@@ -410,7 +404,6 @@ def main():
         """
         data = event.current_buffer.copy_selection()
         clipboard.set_data(data)
-        #text_locals_area.text = "you hit escape w"
         kb_help_text_box.text = widget_list[-1][1]
 
     def switch_focus():
