@@ -55,6 +55,8 @@ Installation
 
       $ pip3 install --user tornado websocket-client ptterm pyperclip pygments
 
+  Note: You may need to install one of the copy/paste mechanisms listed [here](https://pyperclip.readthedocs.io/en/latest/index.html#not-implemented-error)
+
 * install pjdb
 
       $ git clone https://github.com/hokuda/pjdb.git
