@@ -121,6 +121,8 @@ COMMANDS_WITH_ARGUMENT_COMPLETION = [
     'unwatch'
 ]
 
+TIMEOUT=5
+
 
 class FixedRlwrapFilter(rlwrapfilter.RlwrapFilter):
     def write_patiently(fh, buffer):
@@ -927,7 +929,7 @@ class ConditionalBreakpointExecutor(ExecutorBase):
         return prompt
 
     def do_continue(self):
-        return rlwrap_filter.cloak_and_dagger('cont', PROMPT, 0.1)
+        return rlwrap_filter.cloak_and_dagger('cont', PROMPT, TIMEOUT)
         
     def get_condition(self, location):
         manager = BreakPointManager()
@@ -937,7 +939,7 @@ class ConditionalBreakpointExecutor(ExecutorBase):
         return None
 
     def is_condition_true(self, condition):
-        output = rlwrap_filter.cloak_and_dagger('print ' + condition, PROMPT, 0.1)
+        output = rlwrap_filter.cloak_and_dagger('print ' + condition, PROMPT, TIMEOUT)
         result = self.parse_output(output)
         # condition 隧穂ｾ｡邨先棡繧定｡ｨ遉ｺ
         if result:
@@ -982,7 +984,7 @@ class BreakPointBase:
         raise NotImplementedError()
 
     def disable(self):
-        output = rlwrap_filter.cloak_and_dagger("clear " + self.location, PROMPT, 0.1)
+        output = rlwrap_filter.cloak_and_dagger("clear " + self.location, PROMPT, TIMEOUT)
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
 
     def to_string(self):
@@ -992,7 +994,7 @@ class BreakPointBase:
 class BreakPointInMethod(BreakPointBase):
 
     def enable(self):
-        output = rlwrap_filter.cloak_and_dagger("stop in " + self.location, PROMPT, 0.1)
+        output = rlwrap_filter.cloak_and_dagger("stop in " + self.location, PROMPT, TIMEOUT)
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
 
     def to_string(self):
@@ -1006,7 +1008,7 @@ class BreakPointAtLine(BreakPointBase):
         self.fqcn, self.lineno = location.split(':')
             
     def enable(self):
-        output = rlwrap_filter.cloak_and_dagger("stop at " + self.location, PROMPT, 0.1)
+        output = rlwrap_filter.cloak_and_dagger("stop at " + self.location, PROMPT, TIMEOUT)
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": output = " + output)
 
     def to_string(self):
@@ -1154,7 +1156,7 @@ def set_sourcepath():
                 sourcepath += path + ':'
     except Exception as e:
         rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ')\n')
-    output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", 1);
+    output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", TIMEOUT);
 
         
 def debug(msg):
