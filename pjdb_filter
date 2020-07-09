@@ -1155,7 +1155,9 @@ def set_sourcepath():
                     continue
                 sourcepath += path + ':'
     except Exception as e:
-        rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ')\n')
+        rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ').\n'
+                                      + 'The current directory is used for source path.\n')
+        manager.source_path.append(".")
     output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", TIMEOUT);
 
         
