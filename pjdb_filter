@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -u
 # -*- coding: utf-8 -*-
 # 文字化け防止コメント(comment in order to avoid garbling multibyte chars)
-#!/usr/bin/pudb3
+#!/usr/local/bin/pudb3
 """
 pjdb
 """
@@ -564,9 +564,17 @@ class DeleteCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
         """
         Show break points/Removes #th break point
         """
+        index = None
+        class_name = None
+        lineno = None
         tokens = input.strip().split() # not a typo. strip().split(' ') is bad here
         try:
-            index = int(tokens[1])
+            arg = tokens[1]
+            if arg.isdigit():
+                index = int(tokens[1])
+            else:
+                class_name = arg.split(':')[0]
+                lineno = int(arg.split(':')[1])
         except ValueError:
             self.print_help()
             return
@@ -575,9 +583,9 @@ class DeleteCommandExecutor(AbstractCustomCommandExecutor, metaclass=Singleton):
             return
         try:
             manager = BreakPointManager()
-            breakpoint = manager.get(index)
+            breakpoint = manager.get(index=index, class_name=class_name, lineno=lineno)
             breakpoint.disable()
-            manager.remove(index)
+            manager.remove(index=index, class_name=class_name, lineno=lineno)
             manager.print_result()
         except IndexError:
             rlwrap_filter.send_output_oob('index out of range\n')
@@ -872,7 +880,7 @@ class BreakpointInfoSenderExecutor(ExecutorBase, metaclass=Singleton):
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": path: " + str(path))
 
         bplinenos = [x.lineno for x in filter(
-            lambda x:type(x)==BreakPointAtLine and x.fqcn==fqcn, BreakPointManager().get_all()
+            lambda x:type(x)==BreakPointAtLine and x.fqcn.split('$')[0]==fqcn.split('$')[0], BreakPointManager().get_all()
         )]
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": bplinenos: " + str(bplinenos))
 
@@ -1062,14 +1070,24 @@ class BreakPointManager(metaclass=Singleton):
                 rlwrap_filter.send_output_oob(traceback.format_exc())
         return self.break_points.index(break_point)
 
-    def remove(self, i):
-        removed = self.break_points.pop(i)
-        self.result = 'Deleted: ' + removed.to_string()
+    def remove(self, index=None, class_name=None, lineno=None):
+        if index != None:
+            removed = self.break_points.pop(index)
+            self.result = 'Deleted: ' + removed.to_string()
+        else:
+            bp = self.get(class_name=class_name, lineno=lineno)
+            self.break_points.remove(bp)
             
     def get_all(self):
         return self.break_points
     
-    def get(self, i):
+    def get(self, index=None, class_name=None, lineno=None):
+        if index != None:
+            return self.break_points[index]
+        class_name_lineno = class_name + ":" + str(lineno)
+        for i, bp in enumerate(self.break_points):
+            if bp.location == class_name_lineno:
+                break
         return self.break_points[i]
         
     def enable_all(self):

@@ -37,6 +37,8 @@ from pygments.lexers.jvm import JavaLexer
 
 import tornado.websocket
 
+import javalang
+
 import asyncio
 import datetime
 from distutils.spawn import find_executable
@@ -125,6 +127,140 @@ class NoNumberedMarginWithCurrentlineAndBreakpoint(Margin):
         return result
 
 
+class Code():
+    """
+    code
+    """
+    code_cache = {}
+    current = None
+    
+    def __init__(self, fqcn, lineno, path):
+        self.fqcn = fqcn
+        self.lineno = lineno
+        self.path = path
+        if path != None:
+            self.lines = [l.rstrip('\n') for l in self._read_source_code(path)]
+            self.joined_lines = '\n'.join(self.lines)
+            self.numbered_lines = ["{} {}".format(str(i),line) for i,line in enumerate(self.lines, start=1)]
+            self.joined_numbered_lines = '\n'.join(self.numbered_lines)
+            self.cursor_position = sum([len(self.numbered_lines[i])+1 for i in range(lineno-1)])
+        else:
+            self.joined_numbered_lines = "source code is not found"
+            self.cursor_position = 0
+        self.lineno_to_fqcn = self._create_map_from_lineno_to_fqcn()
+        Code.current = self
+
+    def _read_source_code(self, path):
+        try:
+            with open(path, "rt") as fd:
+                return fd.readlines()
+        except Exception as e:
+            warn(traceback.format_exc())
+            raise e
+
+    def _extract_class_from_path(self, path, node):
+        class_list = []
+        for p in list(path) + [node]:
+            if (isinstance(p, javalang.tree.ClassDeclaration) or
+                isinstance(p, javalang.tree.InterfaceDeclaration) or
+                isinstance(p, javalang.tree.ClassCreator)):
+                class_list.append(p)
+        return class_list
+
+    def _create_class_hierarchy_list(self):
+        tree = javalang.parse.parse(self.joined_lines)
+        package_name = tree.package.name
+
+        hlist = []
+        for path, node in tree.filter(javalang.tree.ClassCreator):
+            if node.body == None:
+                continue
+            hlist.append(self._extract_class_from_path(path,node))
+
+        for path, node in tree.filter(javalang.tree.ClassDeclaration):
+            hlist.append(self._extract_class_from_path(path,node))
+
+        for path, node in tree.filter(javalang.tree.InterfaceDeclaration):
+            hlist.append(self._extract_class_from_path(path,node))
+
+        return package_name, hlist
+
+    def _name_anonymous_class(self, tree, depth):
+        _tree = list(filter(lambda x:len(x)>depth+1, tree))
+        inner_classes = list(set([_tree[i][depth+1] for i in range(len(_tree))]))
+        inner_anonymous_classes = list(filter(lambda x: isinstance(x, javalang.tree.ClassCreator), inner_classes))
+        inner_anonymous_classes.sort(key=lambda x: x.body[0].position.line)
+        for i, node in enumerate(inner_anonymous_classes):
+            node.type.name = str(i+1)
+        for node in inner_classes:
+            subtree = list(filter(lambda x: x[depth+1] == node, _tree))
+            self._name_anonymous_class(subtree, depth+1)
+
+    def _get_node_name(self, node):
+        if isinstance(node, javalang.tree.ClassDeclaration)  or isinstance(node, javalang.tree.InterfaceDeclaration):
+            return node.name
+        elif isinstance(node, javalang.tree.ClassCreator):
+            return node.type.name
+
+    def _create_class_tree(self):
+        # make class tree represented in list format
+        # [
+        #   [Util],
+        #   [Util, RuntimeActions],
+        #   [Util, RuntimeActions, 1],
+        #   [Util, RuntimeActions, 2],
+        #   [Util, RuntimeActions, 2, 1],
+        #   ...
+        # ]
+        package_name, hierarchy_list = self._create_class_hierarchy_list()
+
+        self._name_anonymous_class(hierarchy_list, 0)
+
+        return package_name, hierarchy_list
+
+    def _get_fqcn(self, package_name, hierarchy):
+        fqcn = package_name + "." + self._get_node_name(hierarchy[0])
+        if len(hierarchy)==1:
+            return fqcn
+        for node in hierarchy[1:]:
+            fqcn += "$" + self._get_node_name(node)
+        return fqcn
+
+    def _get_line_numbers(self, node):
+        if node == None or isinstance(node, str) or isinstance(node, bool):
+            return []
+    
+        line_numbers = []
+        if hasattr(node, "position") and node.position != None:
+            line_numbers += [node.position.line]
+
+        for child in node.children:
+            if isinstance(child, list) or isinstance(child, set):
+                for x in child:
+                    if x == None:
+                        continue
+                    line_numbers += self._get_line_numbers(x)
+            else:
+                line_numbers += self._get_line_numbers(child)
+
+        return line_numbers
+    
+    def _create_map_from_lineno_to_fqcn(self):
+        package_name, hierarchy_list = self._create_class_tree()
+
+        hierarchy_list.sort(key=lambda x: len(x))
+    
+        lineno_to_fqcn = [None] * len(self.lines)
+
+        for hierarchy in hierarchy_list:
+            fqcn = self._get_fqcn(package_name, hierarchy)
+            line_numbers = list(set(self._get_line_numbers(hierarchy[-1])))
+            for i in line_numbers:
+                lineno_to_fqcn[i-1] = fqcn
+        
+        return lineno_to_fqcn
+
+
 class WebSocketHandler(tornado.websocket.WebSocketHandler):
     # where, locals, dump this, list
     def check_origin(self, origin):
@@ -179,19 +315,8 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
             NoNumberedMarginWithCurrentlineAndBreakpoint.current_lineno = lineno - 1
             path = decoded.get('path')
             debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": path:" + str(path))
-            if path != None:
-                code = self._get_code(path)
-                lines = code.split('\n')
-                lines_with_numbers = ["{} {}".format(str(i),l) for i,l in zip(itertools.count(1), lines)]
-                code = '\n'.join(lines_with_numbers)
-                #cursor_position = sum([len(lines[i])+1 for i in range(lineno-1)])
-                cursor_position = sum([len(lines_with_numbers[i])+1 for i in range(lineno-1)])
-            else:
-                code = "source code is not found"
-                cursor_position = 0
-            #text_code_area.text = code
-            #text_code_area.document = Document(code, lineno)
-            text_code_area.buffer.set_document(Document(code, cursor_position), bypass_readonly=True)
+            code = Code(fqcn, lineno, path)
+            text_code_area.buffer.set_document(Document(code.joined_numbered_lines, code.cursor_position), bypass_readonly=True)
             
         except json.decoder.JSONDecodeError as e:
             debug(e.msg)
@@ -205,16 +330,6 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
     def on_close(self):
         debug("closing websocket")
 
-    def _get_code(self, path):
-        code = ""
-        try:
-            with open(path, "rt") as fd:
-                code = ''.join(fd.readlines())
-                debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": code:" + code)
-        except Exception as e:
-            warn(traceback.format_exc())
-            raise e
-        return code
 
 
 class WebSocketServerThread(threading.Thread):
@@ -274,7 +389,7 @@ def main():
             " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region  C-c:exit copy mode",
         ], [
             text_code_area,
-            " C-q:exit  C-w:switch focus  C-s,/:search  C-spc:mark  s:step  n:next  u:step up  c:cont",
+            " C-q:exit  C-w:switch focus  C-s,/:search  C-spc:mark  s:step  n:next  u:step up  c:cont  b:set/remove breakpoint",
             " C-q:exit  C-w:switch focus  C-s,/:search  C-g:cancel mark  Escape-w:copy selected region",
         ], [
             text_where_area,
@@ -332,7 +447,19 @@ def main():
     @kb.add('b', filter=has_focus_on_code & ~has_selection)
     def _(event):
         "set break point"
-        text_locals_area.text = "b entered with line num = " + str(text_code_area.document.cursor_position_row)
+        #text_locals_area.text = "b entered with line num = " + str(text_code_area.document.cursor_position_row) + " fqcn: " + str(Code.current.lineno_to_fqcn[text_code_area.document.cursor_position_row])
+        lineno = text_code_area.document.cursor_position_row
+        code = Code.current
+        fqcn = code.lineno_to_fqcn[text_code_area.document.cursor_position_row]
+        if fqcn == None:
+            return
+        if lineno in NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos:
+            term1.terminal_control.process.write_input("delete {}:{}\n".format(fqcn, str(lineno+1)))
+            NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos.remove(lineno)
+        else:
+            term1.terminal_control.process.write_input("b {}:{}\n".format(fqcn, str(lineno+1)))
+            NoNumberedMarginWithCurrentlineAndBreakpoint.bplinenos.append(lineno)
+        text_code_area.buffer.set_document(Document(code.joined_numbered_lines, text_code_area.document.cursor_position), bypass_readonly=True)
     
     @Condition
     def is_focus_on_term():

@@ -21,6 +21,7 @@ A wrapper script to enhance `jdb`. It gives `jdb`:
 * [reading sourcepath in file at startup](#reading-sourcepath-in-file-at-startup)
 * [repeating the last command with enter key](#repeating-the-last-command-with-enter-key)
 * and displays `list`, `where`, `locals`, `dump this` at every time a thread is suspended
+* [shortcut keys in source code pane to control the program execution](#shortcut_keys_in_source_code_pane_to_control_the_program_execution)
 
 
 Dependencies
@@ -33,6 +34,7 @@ Dependencies
 * [`ptterm/prompt-toolkit`](https://github.com/prompt-toolkit/ptterm)
 * [`pyperclip`](https://github.com/asweigart/pyperclip)
 * [`pygments`](https://github.com/pygments/pygments)
+* [`javalang`](https://github.com/c2nes/javalang)
 
 
 Installation
@@ -53,7 +55,7 @@ Installation
 
 * install tornado, websocket-client, and ptterm
 
-      $ pip3 install --user tornado websocket-client ptterm pyperclip pygments
+      $ pip3 install --user tornado websocket-client ptterm pyperclip pygments javalang
 
   Note: You may need to install one of the copy/paste mechanisms listed [here](https://pyperclip.readthedocs.io/en/latest/index.html#not-implemented-error)
 
@@ -144,6 +146,15 @@ If the `pjdb.sourcepath` file exists in the current directory, `pjdb` reads it a
 
 After executing `step`, `cont`, and `next` command, hitting `ENTER` key repeats the last command.
 
+### shortcut keys in source code pane to control the program execution
+
+Shortcut keys are available in source code pane to step through your code and set break points.
+
+    s => step
+    n => next
+    u => step up
+    c => cont
+    b => set/remove break point at the current line
 
 Author
 ------
