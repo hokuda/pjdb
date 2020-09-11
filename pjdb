@@ -227,7 +227,7 @@ class Code():
         return fqcn
 
     def _get_line_numbers(self, node):
-        if node == None or isinstance(node, str) or isinstance(node, bool):
+        if node == None or isinstance(node, str) or isinstance(node, bool) or isinstance(node, list):
             return []
     
         line_numbers = []
