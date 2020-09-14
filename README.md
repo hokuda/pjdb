@@ -55,7 +55,7 @@ Installation
 
 * install tornado, websocket-client, and ptterm
 
-      $ pip3 install --user tornado websocket-client ptterm pyperclip pygments javalang
+      $ pip3 install --user -r requirements.txt
 
   Note: You may need to install one of the copy/paste mechanisms listed [here](https://pyperclip.readthedocs.io/en/latest/index.html#not-implemented-error)
 
