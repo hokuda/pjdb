@@ -188,7 +188,9 @@ class Code():
     def _name_anonymous_class(self, tree, depth):
         _tree = list(filter(lambda x:len(x)>depth+1, tree))
         inner_classes = list(set([_tree[i][depth+1] for i in range(len(_tree))]))
-        inner_anonymous_classes = list(filter(lambda x: isinstance(x, javalang.tree.ClassCreator), inner_classes))
+        inner_anonymous_classes = list(
+            filter(lambda x: isinstance(x, javalang.tree.ClassCreator) and len(x.body)>0, inner_classes)
+        )
         inner_anonymous_classes.sort(key=lambda x: x.body[0].position.line)
         for i, node in enumerate(inner_anonymous_classes):
             node.type.name = str(i+1)

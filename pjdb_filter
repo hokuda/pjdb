@@ -32,8 +32,8 @@ BREAKPOINT_FILE='./pjdb.breakpoint'
 SOURCEPATH_FILE='./pjdb.sourcepath'
 DEBUGLOG_FILE = './pjdb_filter.log'
 DEBUGLOG = open(DEBUGLOG_FILE, mode='at') # append in text mode
-DEBUG = False
-#DEBUG = True
+#DEBUG = False
+DEBUG = True
 PROMPT = r"((>)|(.*[^ ]\[[0-9]+\])) $" # default prompt pattern
 COMMANDS = [
     # standard jdb commands
