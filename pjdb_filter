@@ -1167,14 +1167,17 @@ def set_sourcepath():
         with open(SOURCEPATH_FILE, "rt") as file:
             rlwrap_filter.send_output_oob("Found " + SOURCEPATH_FILE + '\n')
             for path in file:
-                path = path.rstrip() # remove \n at the end of the line
+                path = path.strip() # remove \n,\t,spc at the beginning and the end of the line
+                if len(path) == 0:
+                    continue
                 manager.source_path.append(path)
                 if re.match(r'^\s*#.*', path):
                     continue
                 sourcepath += path + ':'
+            if len(sourcepath) == 0:
+                raise Exception(SOURCEPATH_FILE + " is empty.")
     except Exception as e:
-        rlwrap_filter.send_output_oob('Could not open ' + SOURCEPATH_FILE + ' (' + str(e) + ').\n'
-                                      + 'The current directory is used for source path.\n')
+        rlwrap_filter.send_output_oob(str(e) + '\nThe . is used as source path.\n')
         manager.source_path.append(".")
     output = rlwrap_filter.cloak_and_dagger("use " + sourcepath, "> ", TIMEOUT);
 
