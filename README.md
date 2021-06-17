@@ -55,14 +55,14 @@ Installation
 
 * install tornado, websocket-client, and ptterm
 
+      $ git clone https://github.com/hokuda/pjdb.git
+      $ cd pjdb
       $ pip3 install --user -r requirements.txt
 
   Note: You may need to install one of the copy/paste mechanisms listed [here](https://pyperclip.readthedocs.io/en/latest/index.html#not-implemented-error)
 
 * install pjdb
 
-      $ git clone https://github.com/hokuda/pjdb.git
-      $ cd pjdb
       $ cp pjdb pjdb_filter ${path_to_your_favorite_bin_directory}
 
 
