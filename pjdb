@@ -248,18 +248,20 @@ class Code():
         return line_numbers
     
     def _create_map_from_lineno_to_fqcn(self):
-        package_name, hierarchy_list = self._create_class_tree()
-
-        hierarchy_list.sort(key=lambda x: len(x))
-    
         lineno_to_fqcn = [None] * len(self.lines)
 
-        for hierarchy in hierarchy_list:
-            fqcn = self._get_fqcn(package_name, hierarchy)
-            line_numbers = list(set(self._get_line_numbers(hierarchy[-1])))
-            for i in line_numbers:
-                lineno_to_fqcn[i-1] = fqcn
-        
+        try:
+            package_name, hierarchy_list = self._create_class_tree()
+            hierarchy_list.sort(key=lambda x: len(x))
+            for hierarchy in hierarchy_list:
+                fqcn = self._get_fqcn(package_name, hierarchy)
+                line_numbers = list(set(self._get_line_numbers(hierarchy[-1])))
+                for i in line_numbers:
+                    lineno_to_fqcn[i-1] = fqcn
+        except:
+            for i in range(len(self.lines)):
+                lineno_to_fqcn[i] = self.fqcn
+
         return lineno_to_fqcn
 
 
