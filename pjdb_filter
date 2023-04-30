@@ -821,7 +821,7 @@ class BreakpointInfoSenderExecutor(ExecutorBase, metaclass=Singleton):
         debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": srcpath:" + str(srcpath))
         for p in srcpath:
             debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": p: " + p)
-            for root, dirs, files in os.walk(p):
+            for root, dirs, files in os.walk(p, followlinks=True):
                 debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": root: " + root)
                 debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": dirs: " + str(dirs))
                 debug(self.__class__.__name__ + "." + sys._getframe().f_code.co_name + ": files: " + str(files))
